@@ -1,0 +1,13 @@
+services:
+  api:
+    build: ./api
+    ports:
+      - "3001:3001"
+    volumes:
+      - uploads:/app/uploads
+  worker:
+    build: ./worker
+    volumes:
+      - uploads:/app/uploads
+volumes:
+  uploads:

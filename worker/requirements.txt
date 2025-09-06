@@ -1,0 +1,2 @@
+rasterio
+scikit-image
