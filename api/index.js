@@ -1,90 +1,89 @@
-const express = require("express");
-const multer = require("multer");
-const { spawn } = require("child_process");
-const fs = require("fs/promises");
-const path = require("path");
-const cors = require("cors"); // Import cors
+const express = require('express');
+const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
-const port = 3001;
+const port = 8080;
 
-// Enable CORS for all origins
-app.use(cors({ origin: "http://localhost:5173" }));
+app.use(cors());
+app.use(bodyParser.json());
 
-// Increase request body size limit
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ limit: "50mb", extended: true }));
+const upload = multer({ dest: '../data/uploads/' });
 
-const upload = multer({ dest: "uploads/" });
+const jobs = {};
+const jobsFilePath = path.join(__dirname, '../data/jobs.json');
 
-let jobs = {};
+// Load jobs from file
+if (fs.existsSync(jobsFilePath)) {
+  const jobsData = fs.readFileSync(jobsFilePath);
+  Object.assign(jobs, JSON.parse(jobsData));
+}
 
-app.post("/api/upload", upload.single("file"), (req, res) => {
+const saveJobs = () => {
+  fs.writeFileSync(jobsFilePath, JSON.stringify(jobs, null, 2));
+};
+
+app.post('/api/upload', upload.single('file'), (req, res) => {
   const imageId = req.file.filename;
   res.json({ imageId });
 });
 
-app.post("/api/jobs", (req, res) => {
+app.post('/api/jobs', (req, res) => {
   const { imageAId, imageBId, aoi } = req.body;
-  const jobId = Date.now().toString();
+  const jobId = uuidv4();
 
-  jobs[jobId] = {
-    status: "queued",
-    progress: 0,
-    imageAId,
-    imageBId,
-    aoi,
-  };
+  jobs[jobId] = { status: 'Pending', progress: 0 };
+  saveJobs();
 
-  const imageAPath = path.join("/app/uploads", imageAId);
-  const imageBPath = path.join("/app/uploads", imageBId);
+  const outDir = path.join(__dirname, `../data/outputs/${jobId}`);
+  const imageAPath = path.join(__dirname, `../data/uploads/${imageAId}`);
+  const imageBPath = path.join(__dirname, `../data/uploads/${imageBId}`);
+  const aoiStr = `north=${aoi.north};south=${aoi.south};east=${aoi.east};west=${aoi.west}`;
 
-  const pythonProcess = spawn("python", [
-    "../worker/process.py",
-    "--image_a",
-    imageAPath,
-    "--image_b",
-    imageBPath,
-    "--aoi",
-    JSON.stringify(aoi),
-  ]);
+  const workerCmd = `python ../worker/process.py --image_a ${imageAPath} --image_b ${imageBPath} --aoi "${aoiStr}" --out_dir ${outDir}`;
 
-  pythonProcess.stdout.on("data", (data) => {
-    console.log(`Python stdout: ${data}`);
-    jobs[jobId].status = "processing";
-  });
+  jobs[jobId].status = 'Running';
+  saveJobs();
 
-  pythonProcess.stderr.on("data", (data) => {
-    console.error(`Python stderr: ${data}`);
-    jobs[jobId].status = "failed";
-    jobs[jobId].error = data.toString();
-  });
-
-  pythonProcess.on("close", (code) => {
-    if (code === 0) {
-      jobs[jobId].status = "completed";
-      jobs[jobId].progress = 100;
-      jobs[jobId].outputs = {
-        imageAUrl: `/outputs/${imageAId}.outputA.tif`,
-        imageBUrl: `/outputs/${imageBId}.outputB.tif`,
-      };
-    } else {
-      jobs[jobId].status = "failed";
+  exec(workerCmd, (error, stdout, stderr) => {
+    if (error) {
+      console.error(`exec error: ${error}`);
+      jobs[jobId].status = 'Error';
+      jobs[jobId].error = stderr;
+      saveJobs();
+      return;
     }
+    jobs[jobId].status = 'Done';
+    jobs[jobId].outputs = {
+      imageAUrl: `/rasters/outputs/${jobId}/A_clipped.tif`,
+      imageBUrl: `/rasters/outputs/${jobId}/B_clipped_aligned.tif`,
+    };
+    saveJobs();
   });
 
   res.json({ jobId });
 });
 
-app.get("/api/jobs/:jobId", (req, res) => {
+app.get('/api/jobs/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
 
-  if (job) {
-    res.json(job);
-  } else {
-    res.status(404).json({ error: "Job not found" });
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
   }
+
+  res.json(job);
+});
+
+app.get('/rasters/:type/:jobId/:fileName', (req, res) => {
+  const { type, jobId, fileName } = req.params;
+  const filePath = path.join(__dirname, `../data/${type}/${jobId}/${fileName}`);
+  res.sendFile(filePath);
 });
 
 app.listen(port, () => {
